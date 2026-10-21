@@ -46,3 +46,21 @@ python -m http.server 8000
 ```
 En PC-B y PC-C, abrir en el navegador `http://<IP_SERVIDOR>:8000`.
 Si aparece un listado de archivos, la red y el firewall funcionan. Cerrar el servidor con `Ctrl+C`.
+
+## 3. Ejecutar
+
+Activar el entorno en cada PC (`.venv\Scripts\activate`) y luego:
+
+**PC-A (servidor):**
+```powershell
+python server.py
+```
+
+**PCs cliente** (mismo archivo, distinto `--id`):
+```powershell
+python client.py --id 1 --server http://<IP_SERVIDOR>:8000   # PC-B
+python client.py --id 2 --server http://<IP_SERVIDOR>:8000   # PC-C
+python client.py --id 3 --server http://<IP_SERVIDOR>:8000   # PC-C (2ª terminal) o PC-D
+```
+
+Estado de los clientes en el navegador: `http://<IP_SERVIDOR>:8000/status`
