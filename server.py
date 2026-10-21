@@ -2,6 +2,7 @@
 
 Etapa 1: los clientes se registran y el servidor mantiene un registro en memoria.
 Etapa 2: heartbeats; un monitor marca OFFLINE a los clientes que dejan de responder.
+Etapa 3: GET /config para que el cliente arme su partición antes de registrarse.
 """
 import threading
 import time
@@ -53,6 +54,20 @@ class HeartbeatRequest(BaseModel):
     client_id: int
 
 
+def experiment_config():
+    return {
+        "experiment": CFG["experiment"],
+        "training": CFG["training"],
+        "federation": CFG["federation"],
+    }
+
+
+@app.get("/config")
+def config():
+    """El cliente pide la configuración antes de registrarse: necesita el modo/seed para armar su partición."""
+    return experiment_config()
+
+
 @app.post("/register")
 def register(req: RegisterRequest):
     with STATE.lock:
@@ -65,12 +80,7 @@ def register(req: RegisterRequest):
         log(f"Cliente {req.client_id} {'re-registrado' if known else 'registrado'} "
             f"(n_samples={req.n_samples})")
         print_status_table()
-    return {
-        "ok": True,
-        "experiment": CFG["experiment"],
-        "training": CFG["training"],
-        "federation": CFG["federation"],
-    }
+    return {"ok": True, **experiment_config()}
 
 
 @app.post("/heartbeat")

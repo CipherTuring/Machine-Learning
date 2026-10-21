@@ -24,6 +24,12 @@ pip install -r requirements.txt
 
 Para actualizar el código más adelante: `git pull`.
 
+Descargar MNIST una vez en cada PC (queda en `data/`, que no se sube a git) y ver la distribución de datos:
+```powershell
+python analysis/distribution.py
+```
+Genera `results/distribution_iid.csv`, `results/distribution_noniid.csv` y `results/distribution.png`.
+
 ## 2. Red y firewall (solo en la PC del servidor)
 
 1. Conectar todas las PCs a la **misma red** (mismo Wi-Fi o switch).
