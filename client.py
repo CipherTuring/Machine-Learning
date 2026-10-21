@@ -5,6 +5,7 @@ Etapa 2: hilo de heartbeat ("sigo vivo") y reintentos si no hay conexión.
 Etapa 3: el cliente arma su partición local de MNIST según el modo que indica el servidor.
 Etapa 4: modelo CNN, entrenamiento local y métricas; modo --local-only (sin servidor).
 Etapa 5: bucle de rondas: pedir tarea, entrenar el modelo global recibido y devolver solo los pesos.
+Etapa 7: reintentos al enviar pesos y sincronización con el modelo global al reconectarse.
 """
 import argparse
 import threading
@@ -25,6 +26,7 @@ from fl.train import train_local
 HTTP_TIMEOUT = 5       # segundos máximos por petición: nunca quedarse colgado esperando al servidor
 TRANSFER_TIMEOUT = 30  # peticiones que llevan los pesos del modelo (~2 MB)
 POLL_INTERVAL = 1      # cada cuánto pregunta al servidor si hay una ronda nueva
+UPDATE_RETRIES = 3     # intentos para enviar los pesos si la red falla
 
 
 def log(msg):
@@ -38,6 +40,7 @@ class FLClient:
         self.cfg = None
         self.n_samples = 0
         self.connected = False
+        self.needs_sync = False  # lo activa el hilo de heartbeat al reconectarse
         self.model = CNN()
 
     def post(self, path, payload, timeout=HTTP_TIMEOUT):
@@ -118,8 +121,10 @@ class FLClient:
                 if not r["known"]:
                     log("El servidor no me conoce (¿se reinició?): registrándome de nuevo")
                     self.register()
+                    self.needs_sync = True
                 elif r["was_offline"]:
                     log("El servidor me tenía como OFFLINE: ahora estoy ONLINE otra vez")
+                    self.needs_sync = True  # el hilo principal descargará el modelo global vigente
             except requests.RequestException as e:
                 if self.connected:
                     log(f"Sin conexión con el servidor ({type(e).__name__}), reintentando...")
@@ -133,6 +138,8 @@ class FLClient:
         threading.Thread(target=self.heartbeat_loop, daemon=True).start()
         log("Cliente activo. Esperando rondas del servidor (Ctrl+C para salir).")
         while True:
+            if self.needs_sync:
+                self.sync()
             try:
                 task = self.get(f"/task?client_id={self.id}", timeout=TRANSFER_TIMEOUT)
             except requests.RequestException:
@@ -145,6 +152,34 @@ class FLClient:
                 self.train_round(task)
             else:
                 time.sleep(POLL_INTERVAL)
+
+    def sync(self):
+        """Tras una desconexión: descarta el modelo local viejo y descarga el último modelo global."""
+        try:
+            resp = self.get(f"/model?client_id={self.id}", timeout=TRANSFER_TIMEOUT)
+        except requests.RequestException:
+            return  # se reintenta en la próxima vuelta del bucle principal
+        self.model.load_state_dict(b64_to_state_dict(resp["weights"]))
+        self.needs_sync = False
+        log(f"SINCRONIZADO con el modelo global de la ronda {resp['round']} | "
+            f"validación local: {format_metrics(evaluate(self.model, self.val_loader))}")
+
+    def send_update(self, r, payload):
+        """Envía los pesos; si la red falla, reintenta unas pocas veces (el servidor decide si aún sirven)."""
+        for attempt in range(1, UPDATE_RETRIES + 1):
+            try:
+                resp = self.post("/update", payload, timeout=TRANSFER_TIMEOUT)
+                if resp["accepted"]:
+                    log(f"Ronda {r}: pesos enviados al servidor (aceptados)")
+                else:
+                    log(f"Ronda {r}: pesos RECHAZADOS por el servidor: {resp['reason']}. "
+                        f"Se descartan y se espera la próxima ronda.")
+                return
+            except requests.RequestException as e:
+                log(f"Ronda {r}: no se pudieron enviar los pesos ({type(e).__name__}), "
+                    f"intento {attempt}/{UPDATE_RETRIES}")
+                time.sleep(2)
+        log(f"Ronda {r}: se descartan los pesos de esta ronda (sin conexión con el servidor)")
 
     def train_round(self, task):
         """Una ronda: cargar modelo global -> entrenar con datos locales -> evaluar -> enviar solo los pesos."""
@@ -160,12 +195,7 @@ class FLClient:
             f"train_loss={stats['train_loss']:.4f}  validación local: {format_metrics(val)}")
         payload = {"client_id": self.id, "round": r, "n_samples": self.n_samples,
                    "weights": state_dict_to_b64(self.model.state_dict()), "metrics": metrics}
-        try:
-            resp = self.post("/update", payload, timeout=TRANSFER_TIMEOUT)
-            log(f"Ronda {r}: pesos enviados al servidor "
-                f"({'aceptados' if resp['accepted'] else 'RECHAZADOS'})")
-        except requests.RequestException as e:
-            log(f"Ronda {r}: no se pudieron enviar los pesos ({type(e).__name__})")
+        self.send_update(r, payload)
 
 
 def main():

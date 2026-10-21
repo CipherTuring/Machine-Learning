@@ -82,3 +82,24 @@ Estado de los clientes en el navegador: `http://<IP_SERVIDOR>:8000/status`
 ```powershell
 python client.py --id 1 --local-only --epochs 2
 ```
+
+## 4. Prueba de desconexión
+
+Con la federación en marcha, desactivar la tarjeta de red (o el Wi-Fi) de una PC cliente y reactivarla después.
+
+| Momento | Qué muestra el servidor |
+|---|---|
+| ~10 s sin heartbeat | `Cliente k OFFLINE` y `Ronda r: Cliente k excluido por desconexión; la ronda continúa con [...]` |
+| Fin de la ronda | `Ronda r cerrada: updates de [...], excluidos por desconexión [k]` y FedAvg con los clientes disponibles |
+| Rondas siguientes | Se ejecutan solo con los clientes ONLINE (mínimo `min_clients`) |
+| Vuelve la red | `Cliente k RECONECTADO -> se sincroniza con el modelo global de la ronda X y participa desde la ronda Y` |
+| Pesos viejos del cliente | `Update de Cliente k RECHAZADO: update viejo (stale)` |
+| Sincronización | `Cliente k sincronizado con el modelo global de la ronda X`; luego vuelve a entrenar normalmente |
+
+Mecanismos (en `config.yaml`, sección `federation`):
+- `heartbeat_timeout`: segundos sin señal para declarar un cliente OFFLINE.
+- `round_timeout`: tiempo máximo de una ronda; el servidor **nunca** espera indefinidamente a un cliente.
+- `min_clients`: updates mínimos para agregar; si llegan menos, la ronda se repite con el mismo modelo global.
+- `start_wait` / `wait_clients_timeout`: límites de espera al inicio y cuando faltan clientes.
+
+Todo queda registrado en `results/<modo>/events.log`, y en `rounds.csv` (columnas `missing`, `dropped`, `timed_out`).

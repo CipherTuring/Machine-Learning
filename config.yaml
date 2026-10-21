@@ -11,8 +11,10 @@ federation:
   min_clients: 2       # mínimo de updates para agregar una ronda
   rounds: 20
   round_timeout: 90    # segundos máximos de espera por ronda
+  start_wait: 60       # al inicio, espera a todos los clientes como máximo este tiempo; luego basta min_clients
+  wait_clients_timeout: 300  # si hay menos de min_clients conectados durante este tiempo, se aborta
   heartbeat_interval: 3   # cada cuántos segundos el cliente avisa "sigo vivo"
-  heartbeat_timeout: 10   # sin heartbeat durante este tiempo → cliente OFFLINE
+  heartbeat_timeout: 10   # sin heartbeat durante este tiempo -> cliente OFFLINE
 
 experiment:
   mode: iid            # iid | noniid
