@@ -1,0 +1,25 @@
+# Configuración compartida por el servidor y los clientes.
+# Los clientes reciben del servidor la configuración del experimento al registrarse,
+# así que en la práctica basta con editar este archivo en la PC del servidor.
+
+server:
+  host: 0.0.0.0        # escucha en todas las interfaces de red (necesario para la LAN)
+  port: 8000
+
+federation:
+  num_clients: 3       # número de particiones de datos (Cliente 1, 2 y 3), sin importar cuántas PCs haya
+  min_clients: 2       # mínimo de updates para agregar una ronda
+  rounds: 20
+  round_timeout: 90    # segundos máximos de espera por ronda
+  heartbeat_interval: 3   # cada cuántos segundos el cliente avisa "sigo vivo"
+  heartbeat_timeout: 10   # sin heartbeat durante este tiempo → cliente OFFLINE
+
+experiment:
+  mode: iid            # iid | noniid
+  dirichlet_alpha: 0.3 # solo para noniid: menor alpha = más desbalanceado
+  seed: 42
+
+training:
+  local_epochs: 1
+  batch_size: 32
+  lr: 0.01
