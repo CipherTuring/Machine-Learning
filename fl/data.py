@@ -6,20 +6,39 @@ división, así que cada cliente puede quedarse solo con su parte sin que nadie 
 from pathlib import Path
 
 import numpy as np
-from torchvision import datasets, transforms
+import torch
+from torch.utils.data import TensorDataset
+from torchvision import datasets
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 NUM_CLASSES = 10
-
-TRANSFORM = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize((0.1307,), (0.3081,)),  # media y desviación estándar de MNIST
-])
+MNIST_MEAN, MNIST_STD = 0.1307, 0.3081
 
 
 def load_mnist(train=True):
     """Descarga MNIST la primera vez (en ./data) y lo devuelve como Dataset de PyTorch."""
-    return datasets.MNIST(DATA_DIR, train=train, download=True, transform=TRANSFORM)
+    return datasets.MNIST(DATA_DIR, train=train, download=True)
+
+
+def to_tensor_dataset(mnist, indices=None):
+    """Convierte (un subconjunto de) MNIST a tensores normalizados de una sola vez.
+
+    Más rápido que transformar imagen por imagen en cada época.
+    """
+    x, y = mnist.data, mnist.targets
+    if indices is not None:
+        idx = torch.as_tensor(np.asarray(indices))
+        x, y = x[idx], y[idx]
+    x = ((x.float() / 255.0 - MNIST_MEAN) / MNIST_STD).unsqueeze(1)  # (N, 1, 28, 28)
+    return TensorDataset(x, y)
+
+
+def train_val_split(indices, val_fraction, seed):
+    """Separa una parte de los datos locales del cliente para validación local."""
+    rng = np.random.default_rng(seed)
+    shuffled = rng.permutation(indices)
+    n_val = int(len(shuffled) * val_fraction)
+    return shuffled[n_val:], shuffled[:n_val]
 
 
 def partition_iid(labels, num_clients, seed):

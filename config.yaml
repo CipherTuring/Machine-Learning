@@ -23,3 +23,5 @@ training:
   local_epochs: 1
   batch_size: 32
   lr: 0.01
+  momentum: 0.9
+  val_fraction: 0.1    # parte de los datos locales de cada cliente reservada para validación local

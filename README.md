@@ -70,3 +70,8 @@ python client.py --id 3 --server http://<IP_SERVIDOR>:8000   # PC-C (2ª termina
 ```
 
 Estado de los clientes en el navegador: `http://<IP_SERVIDOR>:8000/status`
+
+**Entrenamiento local sin servidor** (prueba del modelo; usa el `config.yaml` de esa PC):
+```powershell
+python client.py --id 1 --local-only --epochs 2
+```
