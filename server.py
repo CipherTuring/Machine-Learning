@@ -5,28 +5,45 @@ Etapa 2: heartbeats; un monitor marca OFFLINE a los clientes que dejan de respon
 Etapa 3: GET /config para que el cliente arme su partición antes de registrarse.
 Etapa 5: una ronda: el servidor publica el modelo global (GET /task) y recibe los pesos
          entrenados de cada cliente (POST /update). Todavía sin agregación.
+Etapa 6: FedAvg, varias rondas, evaluación del modelo global en el test set y resultados en CSV.
 """
+import argparse
+import csv
 import threading
 import time
 from datetime import datetime
+from pathlib import Path
 
 import torch
 import uvicorn
 from fastapi import FastAPI
 from pydantic import BaseModel
+from torch.utils.data import DataLoader
 
 from fl.config import load_config
+from fl.data import load_mnist, to_tensor_dataset
+from fl.fedavg import fedavg
+from fl.metrics import evaluate, format_metrics
 from fl.model import CNN, count_parameters
 from fl.serialization import b64_to_state_dict, describe_state_dict, payload_mb, state_dict_to_b64
 
+ROOT = Path(__file__).resolve().parent
 CFG = load_config()
 HEARTBEAT_TIMEOUT = CFG["federation"]["heartbeat_timeout"]
 NUM_CLIENTS = CFG["federation"]["num_clients"]
 app = FastAPI(title="Servidor federado")
 
+LOG_LOCK = threading.Lock()
+OUT_DIR = None  # carpeta de resultados del experimento (se define al arrancar)
+
 
 def log(msg):
-    print(f"[{datetime.now():%H:%M:%S}] {msg}", flush=True)
+    line = f"[{datetime.now():%H:%M:%S}] {msg}"
+    with LOG_LOCK:
+        print(line, flush=True)
+        if OUT_DIR is not None:
+            with open(OUT_DIR / "events.log", "a", encoding="utf-8") as f:
+                f.write(line + "\n")
 
 
 class ServerState:
@@ -216,28 +233,92 @@ def run_round(r, global_model):
         return dict(STATE.updates)
 
 
+ROUND_FIELDS = ["round", "participants", "missing", "loss", "accuracy", "precision", "recall", "f1",
+                "duration_s", "timestamp"]
+CLIENT_FIELDS = ["round", "client_id", "n_samples", "train_loss", "train_accuracy", "val_loss",
+                 "val_accuracy", "val_precision", "val_recall", "val_f1"]
+
+
+def init_csv(name, fields):
+    with open(OUT_DIR / name, "w", newline="", encoding="utf-8") as f:
+        csv.DictWriter(f, fieldnames=fields).writeheader()
+
+
+def append_csv(name, fields, row):
+    with open(OUT_DIR / name, "a", newline="", encoding="utf-8") as f:
+        csv.DictWriter(f, fieldnames=fields, extrasaction="ignore").writerow(row)
+
+
+def record_round(r, participants, metrics, duration):
+    missing = sorted(set(range(1, NUM_CLIENTS + 1)) - set(participants))
+    append_csv("rounds.csv", ROUND_FIELDS, {
+        "round": r, "participants": " ".join(map(str, participants)),
+        "missing": " ".join(map(str, missing)), **metrics,
+        "duration_s": round(duration, 2), "timestamp": datetime.now().isoformat(timespec="seconds")})
+
+
 def run_federation():
-    """Hilo orquestador: espera a los clientes y ejecuta las rondas."""
+    """Hilo orquestador: espera a los clientes y ejecuta las rondas con FedAvg."""
+    rounds = CFG["federation"]["rounds"]
     torch.manual_seed(CFG["experiment"]["seed"])
     global_model = CNN()
+    # El test set de MNIST es público: no pertenece a ningún cliente, sirve para evaluar el modelo global
+    test_loader = DataLoader(to_tensor_dataset(load_mnist(train=False)), batch_size=1000)
+    init_csv("rounds.csv", ROUND_FIELDS)
+    init_csv("clients.csv", CLIENT_FIELDS)
+
     log(f"Modelo global inicial: CNN con {count_parameters(global_model):,} parámetros")
+    initial = evaluate(global_model, test_loader)
+    log(f"Ronda 0 (modelo sin entrenar) | test: {format_metrics(initial)}")
+    record_round(0, [], initial, 0)
+
     log(f"Esperando a que los {NUM_CLIENTS} clientes estén ONLINE...")
     while True:
         with STATE.lock:
             if len(online_clients()) >= NUM_CLIENTS:
                 break
         time.sleep(1)
-    run_round(1, global_model)
-    # Etapa 5: todavía no se agregan los updates (FedAvg llega en la Etapa 6)
+
+    for r in range(1, rounds + 1):
+        start = time.time()
+        updates = run_round(r, global_model)
+        # Agregación FedAvg: promedio de pesos ponderado por n_samples de cada cliente
+        global_model.load_state_dict(fedavg([(u["n_samples"], u["state_dict"]) for u in updates.values()]))
+        total = sum(u["n_samples"] for u in updates.values())
+        weights_txt = ", ".join(f"C{cid}={u['n_samples'] / total:.3f}" for cid, u in sorted(updates.items()))
+        log(f"FedAvg ronda {r}: {len(updates)} clientes, pesos de agregación [{weights_txt}]")
+        metrics = evaluate(global_model, test_loader)
+        duration = time.time() - start
+        log(f"*** Ronda {r}/{rounds} | modelo global en test: {format_metrics(metrics)} | {duration:.1f}s ***")
+        record_round(r, sorted(updates), metrics, duration)
+        for cid, u in sorted(updates.items()):
+            append_csv("clients.csv", CLIENT_FIELDS,
+                       {"round": r, "client_id": cid, "n_samples": u["n_samples"], **u["metrics"]})
+
+    torch.save(global_model.state_dict(), OUT_DIR / "global_model.pt")
     with STATE.lock:
         STATE.finished = True
-    log("Federación terminada. Ctrl+C para cerrar el servidor.")
+    log(f"Federación terminada ({rounds} rondas). Resultados en {OUT_DIR}. Ctrl+C para cerrar el servidor.")
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=["iid", "noniid"], help="Sobrescribe experiment.mode de config.yaml")
+    parser.add_argument("--rounds", type=int, help="Sobrescribe federation.rounds de config.yaml")
+    parser.add_argument("--out", help="Carpeta de resultados (por defecto results/<modo>)")
+    args = parser.parse_args()
+    if args.mode:
+        CFG["experiment"]["mode"] = args.mode
+    if args.rounds:
+        CFG["federation"]["rounds"] = args.rounds
+    OUT_DIR = Path(args.out) if args.out else ROOT / "results" / CFG["experiment"]["mode"]
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    (OUT_DIR / "events.log").unlink(missing_ok=True)  # cada ejecución empieza un log nuevo
+
     host, port = CFG["server"]["host"], CFG["server"]["port"]
     threading.Thread(target=monitor_clients, daemon=True).start()
     threading.Thread(target=run_federation, daemon=True).start()
     log(f"Servidor escuchando en {host}:{port}  (modo={CFG['experiment']['mode']}, "
-        f"heartbeat_timeout={HEARTBEAT_TIMEOUT}s)")
+        f"rondas={CFG['federation']['rounds']}, heartbeat_timeout={HEARTBEAT_TIMEOUT}s, "
+        f"resultados en {OUT_DIR})")
     uvicorn.run(app, host=host, port=port, log_level="warning")

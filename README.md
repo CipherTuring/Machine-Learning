@@ -59,8 +59,15 @@ Activar el entorno en cada PC (`.venv\Scripts\activate`) y luego:
 
 **PC-A (servidor):**
 ```powershell
-python server.py
+python server.py                                  # usa config.yaml (modo y rondas)
+python server.py --mode noniid --rounds 5         # sobrescribe modo/rondas sin editar config.yaml
+python server.py --mode iid --out results/prueba  # guarda resultados en otra carpeta
 ```
+Resultados (por defecto en `results/<modo>/`, se sobrescriben en cada ejecución):
+`rounds.csv` (métricas del modelo global por ronda), `clients.csv` (métricas locales de cada cliente),
+`events.log` (registro de eventos) y `global_model.pt`.
+
+Los clientes reciben el modo del servidor: si se cambia el modo, **reiniciar también los clientes**.
 
 **PCs cliente** (mismo archivo, distinto `--id`):
 ```powershell
