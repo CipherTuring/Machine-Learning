@@ -4,6 +4,7 @@ Etapa 1: el cliente se registra en el servidor y muestra la configuración recib
 Etapa 2: hilo de heartbeat ("sigo vivo") y reintentos si no hay conexión.
 Etapa 3: el cliente arma su partición local de MNIST según el modo que indica el servidor.
 Etapa 4: modelo CNN, entrenamiento local y métricas; modo --local-only (sin servidor).
+Etapa 5: bucle de rondas: pedir tarea, entrenar el modelo global recibido y devolver solo los pesos.
 """
 import argparse
 import threading
@@ -18,9 +19,12 @@ from fl.config import load_config
 from fl.data import class_counts, get_client_indices, load_mnist, to_tensor_dataset, train_val_split
 from fl.metrics import evaluate, format_metrics
 from fl.model import CNN, count_parameters
+from fl.serialization import b64_to_state_dict, payload_mb, state_dict_to_b64
 from fl.train import train_local
 
-HTTP_TIMEOUT = 5  # segundos máximos por petición: nunca quedarse colgado esperando al servidor
+HTTP_TIMEOUT = 5       # segundos máximos por petición: nunca quedarse colgado esperando al servidor
+TRANSFER_TIMEOUT = 30  # peticiones que llevan los pesos del modelo (~2 MB)
+POLL_INTERVAL = 1      # cada cuánto pregunta al servidor si hay una ronda nueva
 
 
 def log(msg):
@@ -34,14 +38,15 @@ class FLClient:
         self.cfg = None
         self.n_samples = 0
         self.connected = False
+        self.model = CNN()
 
-    def post(self, path, payload):
-        resp = requests.post(f"{self.server}{path}", json=payload, timeout=HTTP_TIMEOUT)
+    def post(self, path, payload, timeout=HTTP_TIMEOUT):
+        resp = requests.post(f"{self.server}{path}", json=payload, timeout=timeout)
         resp.raise_for_status()
         return resp.json()
 
-    def get(self, path):
-        resp = requests.get(f"{self.server}{path}", timeout=HTTP_TIMEOUT)
+    def get(self, path, timeout=HTTP_TIMEOUT):
+        resp = requests.get(f"{self.server}{path}", timeout=timeout)
         resp.raise_for_status()
         return resp.json()
 
@@ -126,9 +131,41 @@ class FLClient:
         self.load_data()
         self.register()
         threading.Thread(target=self.heartbeat_loop, daemon=True).start()
-        log("Cliente activo. Enviando heartbeats (Ctrl+C para salir).")
-        while True:  # en etapas siguientes aquí irá el bucle de rondas federadas
-            time.sleep(1)
+        log("Cliente activo. Esperando rondas del servidor (Ctrl+C para salir).")
+        while True:
+            try:
+                task = self.get(f"/task?client_id={self.id}", timeout=TRANSFER_TIMEOUT)
+            except requests.RequestException:
+                time.sleep(POLL_INTERVAL)  # el hilo de heartbeat ya informa la pérdida de conexión
+                continue
+            if task["action"] == "done":
+                log("El servidor terminó la federación. Fin.")
+                return
+            if task["action"] == "train":
+                self.train_round(task)
+            else:
+                time.sleep(POLL_INTERVAL)
+
+    def train_round(self, task):
+        """Una ronda: cargar modelo global -> entrenar con datos locales -> evaluar -> enviar solo los pesos."""
+        r, train_cfg = task["round"], self.cfg["training"]
+        self.model.load_state_dict(b64_to_state_dict(task["weights"]))
+        log(f"Ronda {r}: modelo global recibido ({payload_mb(task['weights']):.2f} MB). Entrenando...")
+        start = time.time()
+        stats = train_local(self.model, self.train_loader, train_cfg["local_epochs"],
+                            train_cfg["lr"], train_cfg["momentum"])
+        val = evaluate(self.model, self.val_loader)
+        metrics = {**stats, **{f"val_{k}": v for k, v in val.items()}}
+        log(f"Ronda {r}: entrenamiento local listo en {time.time() - start:.1f}s | "
+            f"train_loss={stats['train_loss']:.4f}  validación local: {format_metrics(val)}")
+        payload = {"client_id": self.id, "round": r, "n_samples": self.n_samples,
+                   "weights": state_dict_to_b64(self.model.state_dict()), "metrics": metrics}
+        try:
+            resp = self.post("/update", payload, timeout=TRANSFER_TIMEOUT)
+            log(f"Ronda {r}: pesos enviados al servidor "
+                f"({'aceptados' if resp['accepted'] else 'RECHAZADOS'})")
+        except requests.RequestException as e:
+            log(f"Ronda {r}: no se pudieron enviar los pesos ({type(e).__name__})")
 
 
 def main():
